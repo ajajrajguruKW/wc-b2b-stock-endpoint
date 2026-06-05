@@ -1,105 +1,103 @@
-# WC B2B Stock Endpoint
+# WooCommerce B2B Plugins
 
-A small standalone WordPress plugin that registers a secure, read-only WooCommerce REST endpoint for B2B clients to query live stock data.
+Two self-contained WooCommerce plugins.
+
+| Plugin | Folder | What it does |
+|--------|--------|--------------|
+| Role-Based Tiered Pricing Engine | `role-based-tiered-pricing/` | Per-product, role- and quantity-based pricing applied at the cart. |
+| WC B2B Velocity Endpoint | `wc-b2b-velocity-endpoint/` | Secure REST endpoint exposing 30-day sales velocity per product. |
+
+---
+
+## 1. Role-Based Tiered Pricing Engine
+
+Define pricing tiers per WooCommerce simple product. Each tier targets a customer **role** and a **minimum quantity**. At cart-calculation time the plugin applies the **lowest matching tier price** for the logged-in user's role and the item quantity. If no tier matches, the product's normal price is left untouched.
+
+### Data model
+
+Tiers are stored as a JSON array in the `_tiered_pricing_rules` product meta field:
+
+```json
+[
+  { "role": "wholesale_customer", "min_qty": 10, "price": "8.50" },
+  { "role": "wholesale_customer", "min_qty": 50, "price": "7.25" }
+]
+```
+
+### Admin UI
+
+A **Role-Based Tiered Pricing** meta box appears on the product edit screen with a plain PHP/HTML repeater (no React): pick a role, set a minimum quantity, set a price, add/remove rows.
+
+### Security
+
+- **Nonce** (`rbtp_save_rules`) verified as the first operation on save.
+- **Capability** check: `current_user_can( 'edit_post', $post_id )`.
+- **Sanitisation on save**: `role` whitelisted against `wp_roles()->get_names()`, `min_qty` via `absint()`, `price` via `floatval()` (then normalised to the store's decimal precision).
+- **Output escaping**: every admin field uses `esc_attr` / `esc_html`; the JS row template is passed through `wp_json_encode`.
+
+### Matching logic (`woocommerce_before_calculate_totals`)
+
+For each cart item: collect tiers whose `role` is one of the current user's roles **and** whose `min_qty` ≤ item quantity; apply the lowest such price via `WC_Product::set_price()`. Guarded against admin context and repeat firings of the hook.
+
+---
+
+## 2. WC B2B Velocity Endpoint
 
 ```
-GET /wp-json/wc-b2b/v1/stock/<product_id>
+GET /wp-json/wc-b2b/v1/products/<id>/velocity
 ```
 
-## Installation
+Returns 30-day sales velocity for a product.
 
-1. Copy the `wc-b2b-stock-endpoint` folder into `wp-content/plugins/`.
-2. Activate **WC B2B Stock Endpoint** in **Plugins**. (WooCommerce must be active.)
-
-## Response
-
-On success the endpoint returns a JSON object:
+### Response
 
 ```json
 {
   "product_id": 123,
-  "sku": "B2B-WIDGET-01",
-  "stock_quantity": 42,
-  "stock_status": "instock",
-  "timestamp": "2026-06-04T10:15:30+00:00"
+  "product_name": "B2B Widget",
+  "units_sold_30d": 420,
+  "gross_revenue_30d": 3570.00,
+  "currency": "USD"
 }
 ```
 
-| Field            | Type            | Notes                                         |
-|------------------|-----------------|-----------------------------------------------|
-| `product_id`     | integer         | The product ID.                               |
-| `sku`            | string          | Product SKU (empty string if none).           |
-| `stock_quantity` | integer \| null | `null` when stock management is disabled.     |
-| `stock_status`   | string          | e.g. `instock`, `outofstock`, `onbackorder`.  |
-| `timestamp`      | string          | Generation time, ISO 8601 in **UTC**.         |
+`units_sold_30d` is an integer, `gross_revenue_30d` a float — both type-cast before returning.
 
-All values are cast to their correct types before being returned — no raw `get_post_meta` output is sent to the client. Data is read through WooCommerce CRUD getters (`wc_get_product()` / `WC_Product`).
+### Authentication & authorisation
 
-## Authentication
+| Condition | Result |
+|-----------|--------|
+| Not authenticated | `WP_Error` code `rest_forbidden`, **HTTP 401** |
+| Authenticated, missing `view_b2b_velocity` capability | `WP_Error` code `rest_unauthorized`, **HTTP 403** |
+| Authenticated with `view_b2b_velocity` | `200 OK` |
+| Product missing / not a WC product | `WP_Error` code `rest_product_invalid`, **HTTP 404** |
 
-The endpoint is **not** public. A request is authorised if **either** of these is true:
+The custom `view_b2b_velocity` capability is granted to `administrator` and `shop_manager` on activation. The `wc-b2b/v1` namespace is opted in to WooCommerce's API-key authentication via the `woocommerce_rest_is_request_to_rest_api` filter, so consumer key/secret credentials work.
 
-1. **Logged-in capability** — the current user holds the WooCommerce
-   `view_woocommerce_reports` capability (Shop Managers and Administrators do by
-   default). Useful for same-site/cookie-authenticated requests.
+### Data source
 
-2. **WooCommerce REST API key** — the request supplies a valid
-   `consumer_key` / `consumer_secret` pair generated under
-   **WooCommerce → Settings → Advanced → REST API**. A **Read** permission key
-   is sufficient.
+Units sold and gross revenue are summed from the WooCommerce analytics lookup table `{$wpdb->prefix}wc_order_product_lookup` over the last 30 days. **All user-supplied values are bound with `$wpdb->prepare`** — no raw interpolation into SQL.
 
-   The custom namespace (`wc-b2b/v1`) is explicitly opted in to WooCommerce's
-   key-authentication layer via the `woocommerce_rest_is_request_to_rest_api`
-   filter, so consumer keys are honoured exactly as they are on the core
-   `wc/v3` routes.
-
-Any request that satisfies neither condition receives a `WP_Error` with
-**HTTP 401**:
-
-```json
-{
-  "code": "wc_b2b_unauthorized",
-  "message": "Authentication required. Provide a WooCommerce API key or log in as a user with the view_woocommerce_reports capability.",
-  "data": { "status": 401 }
-}
-```
-
-A request for a non-existent / non-WooCommerce product returns **HTTP 404**
-with code `wc_b2b_product_not_found`.
-
-## Filter hook
-
-Third-party code can extend the response payload before it is returned using
-the `wc_b2b_stock_response` filter:
+### Filter hook
 
 ```php
-add_filter( 'wc_b2b_stock_response', function ( array $response, WC_Product $product, WP_REST_Request $request ) {
-	$response['backorders_allowed'] = $product->backorders_allowed();
-	$response['price']              = (float) $product->get_price();
+add_filter( 'wc_b2b_velocity_response', function ( array $response, WC_Product $product, WP_REST_Request $request ) {
+	$response['avg_units_per_day'] = round( $response['units_sold_30d'] / 30, 2 );
 	return $response;
 }, 10, 3 );
 ```
 
-| Argument    | Type              | Description                       |
-|-------------|-------------------|-----------------------------------|
-| `$response` | `array`           | The response payload (modify it). |
-| `$product`  | `WC_Product`      | The resolved product object.      |
-| `$request`  | `WP_REST_Request` | The current request.              |
-
-## Example request
-
-Using HTTP Basic auth (recommended over HTTPS) with a WooCommerce API key:
+### Example request
 
 ```bash
-curl https://example.com/wp-json/wc-b2b/v1/stock/123 \
-  -u ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:cs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+curl https://example.com/wp-json/wc-b2b/v1/products/123/velocity \
+  -u ck_xxxxxxxxxxxxxxxxxxxxxxxx:cs_xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Equivalent using query-string credentials:
+> Call over **HTTPS** — API-key credentials travel with the request.
 
-```bash
-curl "https://example.com/wp-json/wc-b2b/v1/stock/123?consumer_key=ck_xxxx&consumer_secret=cs_xxxx"
-```
+---
 
-> Always call the endpoint over **HTTPS** — key/secret authentication transmits
-> credentials with the request.
+## Installation
+
+Copy either plugin folder into `wp-content/plugins/` and activate it. WooCommerce must be active.
