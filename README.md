@@ -1,94 +1,70 @@
-# WooCommerce REST Plugins
+# WooCommerce Plugins
 
 Two self-contained WooCommerce plugins.
 
 | Plugin | Folder | What it does |
 |--------|--------|--------------|
-| Razorpay Webhook Receiver | `razorpay-webhook-receiver/` | Verifies Razorpay webhooks (HMAC-SHA256) and transitions orders. |
-| Customer Order Summary Endpoint | `customer-order-summary/` | Authenticated per-customer order summary, cached. |
+| Razorpay Webhook Handler | `razorpay-webhook-handler/` | HMAC-verified, idempotent Razorpay webhook receiver. |
+| Multi-Vendor Order-Splitting Engine | `order-splitting-engine/` | Splits a multi-vendor order into per-vendor sub-orders. |
 
 ---
 
-## 1. Razorpay Webhook Receiver
+## 1. Razorpay Webhook Handler
 
 ```
-POST /wp-json/mypay/v1/razorpay-webhook
+POST /wp-json/myplugin/v1/razorpay-webhook
 ```
 
 ### Configuration
 
-Add the webhook secret to `wp-config.php`:
-
 ```php
+// wp-config.php
 define( 'RAZORPAY_WEBHOOK_SECRET', 'your_webhook_secret_here' );
 ```
 
-The secret is **never** echoed or logged.
+### Behaviour
 
-### Flow
-
-1. **Public route** — `permission_callback` is `__return_true` (documented in code): Razorpay can't send WP credentials, so authenticity is enforced by signature, not auth.
-2. Raw body is read from `php://input` **before** further parsing.
-3. `X-Razorpay-Signature` is validated with `hash_hmac('sha256', $body, RAZORPAY_WEBHOOK_SECRET)` compared via `hash_equals()` (**timing-safe**).
-4. Invalid signature → **HTTP 401** JSON error.
-5. Valid → JSON decoded, order ID read from `payload.payment.entity.notes.wc_order_id`:
-   - `payment.captured` → order to **processing**
-   - `payment.failed` → order to **failed**
-6. Any other event → **HTTP 200** `{"status":"ignored"}`.
-7. **Idempotency** — if the order is already in the target status, or in a terminal state (`completed` / `refunded`), no transition occurs → `{"status":"already_processed"}`.
-8. All meta writes / transitions are wrapped in `try/catch` → **HTTP 500** on unexpected exceptions.
+1. **Public route** — `permission_callback` is `__return_true` (documented in code): Razorpay can't send WP credentials; authenticity is the signature.
+2. **Signature** — raw `php://input` body verified with `hash_hmac('sha256', $body, RAZORPAY_WEBHOOK_SECRET)`, compared via constant-time `hash_equals()`. Missing/invalid → **HTTP 401**.
+3. **Idempotency** — each event's `event_id` is stored in `{prefix}razorpay_processed_events` (`event_id` VARCHAR(64) PK, `payload` LONGTEXT, `processed_at` DATETIME), created on activation with `dbDelta()`. A known `event_id` → **HTTP 200** `{"status":"already_processed"}` with no side effects. The event id is recorded **after** successful handling, so a mid-processing failure lets Razorpay safely retry.
+4. **payment.captured** → order (from `payload.payload.payment.entity.notes.wc_order_id`) transitioned to `processing` via HPOS-compatible `wc_get_order()`.
+5. **All DB access uses `$wpdb->prepare()`** — the SELECT and the `INSERT IGNORE` are both prepared; no raw interpolation of values (only the trusted table prefix).
+6. Every path returns a JSON body (`ok` / `ignored` / `already_processed` / `error`).
 
 ### Test request
 
 ```bash
-BODY='{"event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_123","notes":{"wc_order_id":"456"}}}}}'
+BODY='{"event_id":"evt_001","event":"payment.captured","payload":{"payment":{"entity":{"notes":{"wc_order_id":"456"}}}}}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "your_webhook_secret_here" | sed 's/^.* //')
-curl -X POST https://example.com/wp-json/mypay/v1/razorpay-webhook \
+curl -X POST https://example.com/wp-json/myplugin/v1/razorpay-webhook \
   -H "Content-Type: application/json" \
   -H "X-Razorpay-Signature: $SIG" \
   --data "$BODY"
 ```
 
+> Note: the documented payload path `payload.payload.payment.entity.notes.wc_order_id`
+> is read relative to the decoded JSON root as `payload.payment.entity.notes.wc_order_id`
+> (the outer key in the JSON body is itself named `payload`).
+
 ---
 
-## 2. Customer Order Summary Endpoint
+## 2. Multi-Vendor Order-Splitting Engine
 
-```
-GET /wp-json/mystore/v1/customers/{customer_id}/order-summary
-```
+Products carry their vendor in product meta `_vendor_id` (a WP user ID). When an order spans multiple vendors, it is split into one **sub-order per vendor**.
 
-### Response
+### Behaviour
 
-```json
-{
-  "customer_id": 42,
-  "total_orders": 17,
-  "total_spent": "3420.00",
-  "statuses": { "completed": 12, "processing": 3, "cancelled": 2 },
-  "last_order_date": "2024-11-15T09:22:00+05:30"
-}
-```
-
-- Counts are integers, `total_spent` is a decimal string, `last_order_date` is ISO-8601 in the site timezone (`wp_timezone()`), or `null` if no orders.
-
-### Authorisation
-
-- Requires a logged-in user (else **HTTP 401**).
-- Allowed if the user has `manage_woocommerce` **or** is requesting their own `customer_id`; otherwise **HTTP 403**.
-
-### Implementation notes
-
-- Order data comes from `wc_get_orders()` (no direct `$wpdb`); aggregation is done in PHP.
-- `customer_id` is validated as a **positive integer** in the route `args`.
-- The route registers a **`schema`** callback describing the response.
-- Results are cached in a transient (`mystore_order_summary_<id>`) with a **5-minute TTL**, invalidated on `woocommerce_order_status_changed` for the affected customer.
-
-### Test request
-
-```bash
-curl https://example.com/wp-json/mystore/v1/customers/42/order-summary \
-  --cookie "$(cat wp-cookies.txt)"
-```
+1. **Hook** — runs on `woocommerce_order_status_pending` and `woocommerce_order_status_on-hold` (order created, payment pending/on-hold).
+2. **Grouping** — line items grouped by each product's `_vendor_id` (read via `WC_Product::get_meta()`). Unassigned products stay on the parent. Splits only when **≥ 2 vendors** are present.
+3. **Sub-orders** — created with `wc_create_order()` (never `wp_insert_post()`). Each copies:
+   - billing & shipping addresses,
+   - only that vendor's line items (pricing/tax preserved),
+   - a **proportional** shipping share (weighted by line-item value),
+   - `_parent_order_id` meta referencing the parent.
+4. Each sub-order starts as **`pending`**.
+5. An **order note** on the parent lists the created sub-order IDs.
+6. **Double-split guard** — `_sub_orders_created` meta on the parent; if set, the function does nothing. Sub-orders carry `_parent_order_id`, so they never re-trigger the split.
+7. **HPOS-compatible throughout** — `wc_get_order()`, `wc_create_order()`, `$order->get_meta()`, `update_meta_data()`, `save()`, order items API. No direct `$wpdb` or `update_post_meta()`.
 
 ---
 
