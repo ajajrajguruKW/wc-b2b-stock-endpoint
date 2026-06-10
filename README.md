@@ -1,60 +1,45 @@
-# MyStore Payment Webhook
+# WC Enrollment Confirmed Status
 
-A standalone WordPress plugin that receives payment-gateway webhooks, validates their HMAC-SHA256 signature, enforces idempotency, and updates the matching WooCommerce order.
+A single-file WordPress plugin for WooCommerce + LearnDash stores. It adds a custom order status **"Enrollment Confirmed"** that, when applied to an order, automatically enrols the purchasing customer into every LearnDash course linked to the ordered products.
 
-```
-POST /wp-json/mystore/v1/payment-webhook
-```
+File: `wc-enrol-confirmed/wc-enrol-confirmed.php`
 
-File: `mystore-payment-webhook/mystore-payment-webhook.php`
+## What it does
 
-## Configuration
+1. **Registers** a custom order status with slug `wc-enrol-confirmed` and label **"Enrollment Confirmed"** (`register_post_status` on `init`).
+2. **Adds** it to the WooCommerce order-status list (`wc_order_statuses` filter) so it shows in the admin **Order actions / status** dropdown — inserted right after *Processing*.
+3. **Enrols on transition** — hooked to `woocommerce_order_status_changed` (signature `$order_id, $old_status, $new_status, $order`). When an order moves **to** `enrol-confirmed`, it:
+   - loops every line item,
+   - reads each product's linked course from post meta `_linked_course_id` (ACF / custom field),
+   - enrols the order's customer (by user ID) via `ld_update_course_access( $user_id, $course_id )`,
+   - adds an order note listing the enrolled course IDs.
 
-Store the shared secret in the `mystore_webhook_secret` option:
+> **Prefix note:** `woocommerce_order_status_changed` passes statuses **without** the `wc-` prefix, so the handler compares against the bare slug `enrol-confirmed` (the status is *registered* as `wc-enrol-confirmed`).
 
-```php
-update_option( 'mystore_webhook_secret', 'your_shared_secret_here' );
-```
+## Assumptions
 
-The secret is never echoed or logged.
+- Each WooCommerce product that grants course access stores the LearnDash course ID in post meta `_linked_course_id`.
+- LearnDash is active (provides `ld_update_course_access()`).
 
-## Behaviour
+## Safety / standards
 
-1. **Signature validation** — reads the **raw** `php://input` body and verifies the `X-Webhook-Signature` header, which must equal the hex-encoded `hash_hmac('sha256', $body, $secret)`. Comparison uses constant-time `hash_equals()`. Missing/invalid → **HTTP 401**.
-2. **Idempotency** — the JSON body carries `{ "event_id", "order_id", "status" }`. Processed `event_id`s are stored in `{prefix}mystore_processed_events` (`event_id VARCHAR(128)` PK, `processed_at DATETIME`), created on activation via `dbDelta()`. A known event → **HTTP 200** `{"result":"already_processed"}` with no reprocessing.
-3. **Order update** — when `status` is `paid`, the WooCommerce order is moved to `processing` and an order note records the `event_id`.
-4. **Success** — returns **HTTP 200** `{"result":"ok"}`.
+- **No `global $woocommerce`** — uses `$order` / `wc_get_order()` helpers only.
+- Guest orders (no customer user ID) are skipped with an explanatory order note (no fatal).
+- If LearnDash is inactive, enrolment is skipped with a note (no fatal).
+- Course IDs are deduped across line items.
+- All IDs run through `absint()`; the order note text is escaped with `esc_html__()` / `esc_html()`.
+- WordPress Coding Standards: snake_case `wc_enrol_`-prefixed functions, tab indentation, Yoda conditions.
 
-### Error responses
+## How to test
 
-| Case | Status | Body |
-|------|--------|------|
-| Invalid / missing signature | 401 | `{"result":"error", ...}` |
-| Malformed JSON / bad event_id | 400 | `{"result":"error", ...}` |
-| Order not found (paid event) | 404 | `{"result":"error", ...}` |
-| Secret not configured / unexpected | 500 | `{"result":"error", ...}` |
-
-## Security & code quality
-
-- `hash_equals()` for signature comparison (timing-safe).
-- All inputs sanitized (`sanitize_text_field`, `absint`, `sanitize_key`) and validated before use.
-- Custom-table reads and writes use `$wpdb->prepare()`; the insert is `INSERT IGNORE` to survive races.
-- Public route via `register_rest_route()` with `__return_true` (documented: signature replaces auth).
-- WordPress Coding Standards: snake_case prefixed functions, proper activation/REST hooks.
-- The event is recorded **after** the order side effects succeed, so a failure lets the gateway safely retry.
-
-## Test request
-
-```bash
-SECRET="your_shared_secret_here"
-BODY='{"event_id":"evt_001","order_id":123,"status":"paid"}'
-SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
-curl -X POST https://example.com/wp-json/mystore/v1/payment-webhook \
-  -H "Content-Type: application/json" \
-  -H "X-Webhook-Signature: $SIG" \
-  --data "$BODY"
-```
+1. Activate the plugin (WooCommerce + LearnDash active).
+2. On a product, set the post meta / ACF field `_linked_course_id` to a valid LearnDash course ID.
+3. Place an order for that product as a **registered** customer.
+4. In the admin, change the order status to **Enrollment Confirmed** and save.
+5. Confirm:
+   - the customer now has access to the LearnDash course, and
+   - the order shows a note like *"Enrollment Confirmed: user #42 enrolled into LearnDash course(s): 101, 205."*
 
 ## Installation
 
-Copy the `mystore-payment-webhook/` folder into `wp-content/plugins/` and activate it. WooCommerce must be active for order updates.
+Copy the `wc-enrol-confirmed/` folder into `wp-content/plugins/` and activate it.
