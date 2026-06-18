@@ -1,36 +1,32 @@
-# SpiceRoute Wholesale — MOQ Enforcement
+# B2B MOQ Enforcement
 
-A single-file WordPress plugin that enforces a per-product **Minimum Order Quantity (MOQ)** for a B2B WooCommerce store. MOQ data comes entirely from the ACF field `moq_quantity` — there is no settings UI and nothing is hardcoded.
+A single-file WordPress plugin that enforces a per-product **Minimum Order Quantity (MOQ)** for wholesale (B2B) customers, using native WooCommerce hooks only — no external libraries.
 
-File: `srw-moq-enforcement/srw-moq-enforcement.php`
+File: `b2b-moq-enforcement/b2b-moq-enforcement.php`
 
 ## What it does
 
-1. **Add-to-cart guard** — `woocommerce_add_to_cart_validation` (priority 10): if the quantity being added is below the product's MOQ, an error notice is shown via `wc_add_notice()` and the add is blocked.
-2. **Cart / checkout guard** — `woocommerce_check_cart_items` (priority 10): every line item is re-validated. If any item's quantity is below its MOQ, an error naming the product and its required MOQ is added, which blocks checkout. This also catches quantities edited on the cart page or items added before the plugin was active.
-
-## MOQ source
-
-- Read with **`get_field( 'moq_quantity', $product_id )`** (ACF).
-- If the field is empty, unset, or ACF is not active, the MOQ is treated as **1** (no restriction).
-- The value is `absint()`-ed and floored to a minimum of 1.
+1. **Product field** — adds a number input **"B2B Minimum Order Quantity"** to the product **General** tab (`woocommerce_product_options_general_product_data`), stored in the `_b2b_moq` meta. Saved on `woocommerce_process_product_meta`, sanitised with `absint()` and persisted via the WooCommerce CRUD API (`$product->update_meta_data()` / `save()`).
+2. **B2B gating** — MOQ rules apply **only** to users with the `b2b_customer` role. Any other user (including guests) is silently skipped.
+3. **Cart validation** — on `woocommerce_check_cart_items`, every cart line item whose product has `_b2b_moq > 0` is checked. If the cart quantity is below the MOQ, an error notice via `wc_add_notice()` names the product and the required minimum, blocking checkout.
 
 ## Standards & safety
 
-- Unique function prefix `srw_moq_`.
-- No direct DB calls — MOQ comes from ACF; cart data from `WC()->cart`.
-- Uses `WC()` helpers (no `global $woocommerce`).
-- All dynamic values escaped: product names via `esc_html()`, notice strings via `esc_html__()`.
-- Correct hook priorities and the full `woocommerce_add_to_cart_validation` signature (6 args).
+- Unique function prefix `b2b_moq_`.
+- All user-facing strings internationalised with text domain **`b2b-moq`** (loaded via `load_plugin_textdomain`).
+- Dynamic values escaped (`esc_html()`, `esc_html__()`).
+- Save sanitised to a non-negative integer; WooCommerce verifies its product-data nonce before the save hook fires.
+- Complete plugin header (Plugin Name, Description, Version, Author, Text Domain).
+- Pure WordPress/WooCommerce — no external dependencies.
 
 ## How to test
 
-1. Activate the plugin (WooCommerce + ACF active).
-2. On a product, set the ACF field `moq_quantity` to e.g. `10`.
-3. Try adding **5** of that product → blocked with: *"<Product> has a minimum order quantity of 10…"*.
-4. Add **10** → succeeds. Then on the cart page lower it to **3** and go to checkout → checkout is blocked with a per-item error.
-5. A product with no `moq_quantity` set behaves normally (MOQ = 1).
+1. Ensure a `b2b_customer` role exists and assign it to a test user.
+2. Activate the plugin (WooCommerce active).
+3. Edit a product → **General** tab → set **B2B Minimum Order Quantity** to e.g. `12` and update.
+4. As the `b2b_customer` user, add **5** of that product and go to the cart → blocked with: *"<Product> has a B2B minimum order quantity of 12. You currently have 5 in your cart."*
+5. As a normal customer (or guest), the same cart proceeds with no MOQ error.
 
 ## Installation
 
-Copy the `srw-moq-enforcement/` folder into `wp-content/plugins/` and activate it.
+Copy the `b2b-moq-enforcement/` folder into `wp-content/plugins/` and activate it.
