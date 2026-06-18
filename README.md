@@ -1,45 +1,36 @@
-# WC Enrollment Confirmed Status
+# SpiceRoute Wholesale — MOQ Enforcement
 
-A single-file WordPress plugin for WooCommerce + LearnDash stores. It adds a custom order status **"Enrollment Confirmed"** that, when applied to an order, automatically enrols the purchasing customer into every LearnDash course linked to the ordered products.
+A single-file WordPress plugin that enforces a per-product **Minimum Order Quantity (MOQ)** for a B2B WooCommerce store. MOQ data comes entirely from the ACF field `moq_quantity` — there is no settings UI and nothing is hardcoded.
 
-File: `wc-enrol-confirmed/wc-enrol-confirmed.php`
+File: `srw-moq-enforcement/srw-moq-enforcement.php`
 
 ## What it does
 
-1. **Registers** a custom order status with slug `wc-enrol-confirmed` and label **"Enrollment Confirmed"** (`register_post_status` on `init`).
-2. **Adds** it to the WooCommerce order-status list (`wc_order_statuses` filter) so it shows in the admin **Order actions / status** dropdown — inserted right after *Processing*.
-3. **Enrols on transition** — hooked to `woocommerce_order_status_changed` (signature `$order_id, $old_status, $new_status, $order`). When an order moves **to** `enrol-confirmed`, it:
-   - loops every line item,
-   - reads each product's linked course from post meta `_linked_course_id` (ACF / custom field),
-   - enrols the order's customer (by user ID) via `ld_update_course_access( $user_id, $course_id )`,
-   - adds an order note listing the enrolled course IDs.
+1. **Add-to-cart guard** — `woocommerce_add_to_cart_validation` (priority 10): if the quantity being added is below the product's MOQ, an error notice is shown via `wc_add_notice()` and the add is blocked.
+2. **Cart / checkout guard** — `woocommerce_check_cart_items` (priority 10): every line item is re-validated. If any item's quantity is below its MOQ, an error naming the product and its required MOQ is added, which blocks checkout. This also catches quantities edited on the cart page or items added before the plugin was active.
 
-> **Prefix note:** `woocommerce_order_status_changed` passes statuses **without** the `wc-` prefix, so the handler compares against the bare slug `enrol-confirmed` (the status is *registered* as `wc-enrol-confirmed`).
+## MOQ source
 
-## Assumptions
+- Read with **`get_field( 'moq_quantity', $product_id )`** (ACF).
+- If the field is empty, unset, or ACF is not active, the MOQ is treated as **1** (no restriction).
+- The value is `absint()`-ed and floored to a minimum of 1.
 
-- Each WooCommerce product that grants course access stores the LearnDash course ID in post meta `_linked_course_id`.
-- LearnDash is active (provides `ld_update_course_access()`).
+## Standards & safety
 
-## Safety / standards
-
-- **No `global $woocommerce`** — uses `$order` / `wc_get_order()` helpers only.
-- Guest orders (no customer user ID) are skipped with an explanatory order note (no fatal).
-- If LearnDash is inactive, enrolment is skipped with a note (no fatal).
-- Course IDs are deduped across line items.
-- All IDs run through `absint()`; the order note text is escaped with `esc_html__()` / `esc_html()`.
-- WordPress Coding Standards: snake_case `wc_enrol_`-prefixed functions, tab indentation, Yoda conditions.
+- Unique function prefix `srw_moq_`.
+- No direct DB calls — MOQ comes from ACF; cart data from `WC()->cart`.
+- Uses `WC()` helpers (no `global $woocommerce`).
+- All dynamic values escaped: product names via `esc_html()`, notice strings via `esc_html__()`.
+- Correct hook priorities and the full `woocommerce_add_to_cart_validation` signature (6 args).
 
 ## How to test
 
-1. Activate the plugin (WooCommerce + LearnDash active).
-2. On a product, set the post meta / ACF field `_linked_course_id` to a valid LearnDash course ID.
-3. Place an order for that product as a **registered** customer.
-4. In the admin, change the order status to **Enrollment Confirmed** and save.
-5. Confirm:
-   - the customer now has access to the LearnDash course, and
-   - the order shows a note like *"Enrollment Confirmed: user #42 enrolled into LearnDash course(s): 101, 205."*
+1. Activate the plugin (WooCommerce + ACF active).
+2. On a product, set the ACF field `moq_quantity` to e.g. `10`.
+3. Try adding **5** of that product → blocked with: *"<Product> has a minimum order quantity of 10…"*.
+4. Add **10** → succeeds. Then on the cart page lower it to **3** and go to checkout → checkout is blocked with a per-item error.
+5. A product with no `moq_quantity` set behaves normally (MOQ = 1).
 
 ## Installation
 
-Copy the `wc-enrol-confirmed/` folder into `wp-content/plugins/` and activate it.
+Copy the `srw-moq-enforcement/` folder into `wp-content/plugins/` and activate it.
