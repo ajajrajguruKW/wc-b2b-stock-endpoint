@@ -1,32 +1,31 @@
-# B2B MOQ Enforcement
+# WC Shipping Info Tab
 
-A single-file WordPress plugin that enforces a per-product **Minimum Order Quantity (MOQ)** for wholesale (B2B) customers, using native WooCommerce hooks only — no external libraries.
+A single-file WordPress plugin that adds a **"Shipping Info"** tab to every WooCommerce single product page, driven by per-product content stored in the `_custom_shipping_info` meta.
 
-File: `b2b-moq-enforcement/b2b-moq-enforcement.php`
+File: `wc-shipping-info-tab/wc-shipping-info-tab.php`
 
 ## What it does
 
-1. **Product field** — adds a number input **"B2B Minimum Order Quantity"** to the product **General** tab (`woocommerce_product_options_general_product_data`), stored in the `_b2b_moq` meta. Saved on `woocommerce_process_product_meta`, sanitised with `absint()` and persisted via the WooCommerce CRUD API (`$product->update_meta_data()` / `save()`).
-2. **B2B gating** — MOQ rules apply **only** to users with the `b2b_customer` role. Any other user (including guests) is silently skipped.
-3. **Cart validation** — on `woocommerce_check_cart_items`, every cart line item whose product has `_b2b_moq > 0` is checked. If the cart quantity is below the MOQ, an error notice via `wc_add_notice()` names the product and the required minimum, blocking checkout.
+1. **Front-end tab** — registers a "Shipping Info" tab via `woocommerce_product_tabs` (priority 25, between Description and Reviews).
+2. **Content + fallback** — shows the product's `_custom_shipping_info` meta. If empty/unset, displays the fallback **"No shipping information available."**
+3. **Admin editor** — adds a "Shipping Info" tab to the product data metabox (`woocommerce_product_data_tabs` + `woocommerce_product_data_panels`) with a textarea to enter/save the value.
+4. **Escaping** — front-end output is escaped with `esc_html()` (then `nl2br()` for line breaks) and `esc_html__()`.
+5. **Secure save** — `woocommerce_process_product_meta` handler verifies a dedicated nonce (`wc_csi_save_meta` / `wc_csi_nonce`) **first**, checks `edit_post` capability, sanitises with `sanitize_textarea_field()`, and persists via the WooCommerce CRUD API.
 
 ## Standards & safety
 
-- Unique function prefix `b2b_moq_`.
-- All user-facing strings internationalised with text domain **`b2b-moq`** (loaded via `load_plugin_textdomain`).
-- Dynamic values escaped (`esc_html()`, `esc_html__()`).
-- Save sanitised to a non-negative integer; WooCommerce verifies its product-data nonce before the save hook fires.
+- Unique function prefix `wc_csi_`.
+- Internationalised with text domain **`wc-csi`**.
 - Complete plugin header (Plugin Name, Description, Version, Author, Text Domain).
-- Pure WordPress/WooCommerce — no external dependencies.
+- Self-contained, no external libraries.
 
 ## How to test
 
-1. Ensure a `b2b_customer` role exists and assign it to a test user.
-2. Activate the plugin (WooCommerce active).
-3. Edit a product → **General** tab → set **B2B Minimum Order Quantity** to e.g. `12` and update.
-4. As the `b2b_customer` user, add **5** of that product and go to the cart → blocked with: *"<Product> has a B2B minimum order quantity of 12. You currently have 5 in your cart."*
-5. As a normal customer (or guest), the same cart proceeds with no MOQ error.
+1. Activate the plugin (WooCommerce active).
+2. Edit a product → **Product data** metabox → **Shipping Info** tab → enter text and update.
+3. View the product page → the **Shipping Info** tab shows your text.
+4. Clear the field and update → the tab shows *"No shipping information available."*
 
 ## Installation
 
-Copy the `b2b-moq-enforcement/` folder into `wp-content/plugins/` and activate it.
+Copy the `wc-shipping-info-tab/` folder into `wp-content/plugins/` and activate it.
